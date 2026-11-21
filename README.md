@@ -2,22 +2,21 @@
 
 # orkmem
 
-Permanent memory for AI agents that never shows an outdated fact as current.
+Permanent memory for AI agents. Rules stay whole, outdated facts never pass as current.
 One Python file, no dependencies.
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
-![tests: 15 invariants](https://img.shields.io/badge/tests-15%20invariants-0f766e)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
 
-orkmem is a command-line memory for coding and chat agents. The agent runs `memo` through its shell as it works:
-- it writes one-line entries;
-- at the start of every session, and again after every compaction, it reads its rules and current facts;
-- it asks for anything older when it needs it.
+Your agent runs `memo` from its shell:
+- **While working**, it writes one-line notes.
+- **At the start of every session, and after every compaction**, it reads its rules and current facts back.
+- **When it needs something older**, it asks for it.
 
-A rule stays in front of the agent, in full, however old it gets. A fact that has been replaced is never shown as the current one.
+The user never has to maintain anything.
 
 ![how orkmem works](docs/how-it-works.png)
 
@@ -28,51 +27,35 @@ git clone https://github.com/orkait/orkmem
 sh orkmem/install.sh
 ```
 
-The installer copies `memo` to `~/.orkmem/memo`, creates the memory in `~/.orkmem/memory`, and prints a `## Memory` block. Paste that block at the top of your agent's `AGENTS.md` or `CLAUDE.md`. Running it again updates the tool and never touches a memory.
+This puts the tool at `~/.orkmem/memo` and the memory at `~/.orkmem/memory`. It also prints a short `## Memory` block: paste it into your agent's `AGENTS.md` or `CLAUDE.md`. Run the installer again to update; your memory is never touched. Put `~/.orkmem` on your `PATH` to type `memo`.
 
-## 🧭 Commands
+## 🧭 Use
 
-| Command | What it does |
+```sh
+memo wake                                         # start of a session: rules, open items, current facts
+memo note --rule --user "Never merge without my OK"   # something the user wants, always
+memo note --subject app.version "Live: 9de29cb"   # a fact that can change; the newer one replaces it
+memo note "Chose Postgres over SQLite: one store"  # anything else worth keeping
+memo ask deploy version                           # search: current entries first
+memo open 9cfa28cd                                # one entry, with what it replaced
+memo drop 72fb92eb "wrong host"                   # retire a wrong entry
+```
+
+## 📝 How it stays correct
+
+| | |
 |---|---|
-| `memo wake [page [head]]` | Shows, in pages of at most 10,000 bytes: every active rule in full, newest first; open items; the latest fact per subject; the 24 most recent entries; and a TIDY request when rules outgrow their budget |
-| `memo note "..."` | Appends one line of at most 280 bytes, then shows the 3 closest earlier entries |
-| `memo ask <words>` | Searches the whole memory, 20 results per page. Current entries come first, newest first; a replaced entry is listed under its replacement |
-| `memo open <id>` | Shows one entry whole, with what it replaced and what replaced it; `--around N` adds its neighbours |
-| `memo drop <id> "why"` | Retires an entry that is wrong or outdated; the entry stays in the log. A rule the user stated cannot be dropped, only replaced by the user |
-| `memo distinct <a> <b>` | Tells the TIDY request that two rules it paired say different things, so it stops offering them |
-| `memo guard [action]` | Says whether an active rule forbids an action; with no action given, it reads hook JSON on stdin |
-| `memo import <optmem-dir>` | Adds the memories of an [OptMem](https://github.com/VictorTaelin/OptMem) `LOG.txt` that are not imported yet, so it can run again while old sessions still write to OptMem; `memo open '#12'` still finds OptMem memory #12 |
-| `memo config [NAME=VALUE]` | Shows or changes `ENTRY_BYTES`, `PAGE_BYTES`, `RULE_BYTES`, `RECENT_LINES`, `ASK_LINES` and `HINTS` |
+| Two kinds of entry | A **rule** holds until it is replaced. A **fact** is true as of its date, and a newer fact on the same subject replaces it |
+| Rules are never shortened | `wake` shows every rule in full, newest first; where two conflict, the newer wins |
+| Only the user changes the user's rules | The agent cannot drop them, only record the user's new rule with `--replaces` |
+| Rules stay few on their own | When rules outgrow their budget, `memo` asks the agent to merge two that overlap, or mark them `distinct`. A merge that loses a "never", "not" or "must", or adds a fact none of the rules held, is refused |
+| Nothing is lost | The log is append-only. Replaced entries stay readable with `memo open` |
+| Damage is refused | Each entry carries a hash of itself and of the one before. An edited or truncated log is refused, not served |
+| Output fits | Every page is at most 10,000 bytes; search returns 20 results a page |
 
-## 📝 Two kinds of entry
+## 🛡️ Enforce a rule with a hook
 
-| Kind | Written with | True until | Shown by wake |
-|---|---|---|---|
-| Rule | `memo note --rule [--user] "..."` | It is replaced (`--replaces <id>`) or dropped. A rule the user stated changes only through a new `--user` rule | Always, in full, however old; where two conflict, the newer wins |
-| Fact | `memo note [--subject <topic>] "..."` | A newer fact on the same subject replaces it automatically | The latest per subject, with its age |
-
-## 🧹 Rules stay small without the user
-
-Rules are shown whole, so the tool keeps them few instead of shortening them. Nobody asks the user, in the same spirit as OptMem's merges:
-
-| Step | What happens |
-|---|---|
-| Budget | When the active rules take more than `RULE_BYTES` (8,000 by default), `wake` and `note` end with a TIDY request naming the two rules that overlap most |
-| Only real overlap | A pair is offered only when it shares at least a quarter of the smaller rule's rare words. Rules that stay over budget without such a pair are kept whole, on more pages |
-| The agent decides | If they say the same thing, it writes one rule that replaces both; if not, it runs `memo distinct`, and that pair is never offered again |
-| The tool checks | A merge is refused when it loses a never, no, not, must, always or only of the rules it merges, or adds a number, path or identifier none of them holds |
-| Nothing is lost | The merged rules stay in the log; `memo open` on the merged rule lists them |
-
-| Flag | Meaning |
-|---|---|
-| `--user` | The user said it. Without it, the entry is marked as written by the agent |
-| `--open` | A fact that stays under OPEN in wake until it is replaced or dropped |
-| `--guard <regex>` | A rule a hook can enforce: `memo guard` denies any action that matches |
-| `--replaces <id>` | This entry corrects an earlier one. An id can be shortened to its first 4 or more characters |
-
-## 🛡️ Enforcing rules with a hook
-
-`memo guard` can run as a Claude Code `PreToolUse` hook. It prints a deny decision as JSON, so a tool call that matches a `--guard` rule is blocked:
+A rule written with `--guard <regex>` can block matching tool calls when `memo guard` runs as a Claude Code `PreToolUse` hook:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"$HOME/.orkmem/memo\" guard"}]}]}}
@@ -82,108 +65,26 @@ Rules are shown whole, so the tool keeps them few instead of shortening them. No
 memo note --rule --user --guard '^gh pr merge' "Merge only after the user's OK"
 ```
 
-For a Bash call the pattern is matched against the command; for other tools, against the tool input as JSON. If the input cannot be read or the memory is damaged, the hook denies rather than letting the call through.
+## 🔁 Coming from OptMem
 
-## 📁 Files
-
-```
-~/.orkmem/
-  memo            the tool: one Python 3 file, no dependencies
-  memory/
-    LOG.jsonl     every entry, one JSON object per line, append-only
-    HEAD          the id of the last entry
-    config        the sizes, written by memo config
+```sh
+MEMORY_DIR=~/.orkmem/memory memo import ~/.optmem/memory
 ```
 
-How the files are kept safe:
-- An entry's id is a hash of its contents and of the previous id.
-- Every read checks the whole chain, and checks that `HEAD` is in it.
-- An edited, reordered or truncated log is refused with "The memory is damaged" rather than served.
-- A half-written last line, left by a crash, is dropped on the next write.
-- Writers take a lock, so parallel sessions append in order.
-
-Set `$MEMORY_DIR` to keep the memory elsewhere. Only `memo init` creates a memory, so a typo in `$MEMORY_DIR` fails loudly instead of starting an empty one.
-
-## 🔁 How it differs from OptMem
-
-| | OptMem | orkmem |
-|---|---|---|
-| Identity | Position in a fixed-width file | A hash of the entry, chained to the one before |
-| Older memories | A binary tree of one-line summaries the agent writes | No summaries: entries stay whole, and `ask` finds them |
-| Start of a session | 96 lines; older memories are shown ever coarser | All active rules in full, the latest fact per subject, and recent entries |
-| Search | Regex, oldest first, capped at 20 KB | Words; current and newest first; 20 per page |
-| Corrections | Not linked | `--replaces`, same-subject facts, and `drop` |
-| Work on the agent's turn | Merging summaries after notes (`nap`) | None |
+Every OptMem memory is kept with its number (`memo open '#12'`). Running it again adds only new notes, so it can catch up while old sessions finish.
 
 ## ⚠️ Limits
 
 | Limit | Detail |
 |---|---|
-| Reads are linear | Every command parses and checks the whole log. Measured: about 0.05 s at 2,500 entries and 0.85 s at 100,000. OptMem stays fast at a million entries |
-| Platforms | Linux and macOS (`fcntl` locking). Windows is not supported yet |
-| A stale copy of the whole folder | If a sync tool restores both `LOG.jsonl` and `HEAD` from an old copy, the memory is consistent and the loss cannot be seen |
-| Imported memories | They arrive as facts, with no subjects or links. Restate standing rules with `memo note --rule --user` |
-| Search is by words | "festival" does not find "Diwali" |
+| Speed | Each command reads the whole log: 0.05 s at 2,500 entries, 0.85 s at 100,000 |
+| Platforms | Linux and macOS |
+| Search | It matches words: "festival" does not find "Diwali" |
 
 ## 🧪 Tests
 
 ```sh
 python3 test.py
-```
-
-The suite runs the real command line against temporary memories and checks 15 invariants:
-
-| Area | What is checked |
-|---|---|
-| Rules | They stay whole after 3,000 imported entries; replaced and dropped rules leave the list; only the user ends a user rule |
-| Tidy | Over budget, the two overlapping rules are offered until merged or marked distinct; rules that barely overlap are never offered; a merge that loses a never or invents a fact is refused |
-| Facts | Only the newest fact per subject is current |
-| Damage | Edited, truncated and reordered logs are refused; a torn write is repaired |
-| Concurrency | 8 parallel writers neither fork nor lose an entry |
-| Paging | Every page fits, and pages do not shift |
-| `ask` | Results are bounded |
-| `guard` | It denies only what active rules forbid, and fails closed |
-| Input | Bad input is refused |
-| Import | OptMem ids survive import; running it again adds only what is new |
-
-## 🧾 The prompt
-
-`memo init` prints this block. It is the whole integration.
-
-```markdown
-## Memory
-
-Your memory is orkmem. The tool is `~/.orkmem/memo`; the memory is in `~/.orkmem/memory`.
-
-### At startup and after every compaction (mandatory)
-
-Your first action, and your first action after a compaction: `~/.orkmem/memo wake`.
-Read page after page until one ends with "End of memory." Every RULE applies,
-however old; where two conflict, the newer one wins. A NOW fact is the last thing
-seen: check it again before you act on it. When the memory shows a TIDY request,
-do it before your next action, the same way you would answer any other request.
-
-### While working: write it down (mandatory)
-
-- `~/.orkmem/memo note --rule --user "..."` when the user says how things must be done.
-- `~/.orkmem/memo note --subject <topic> "..."` for a fact that can change (a version, a
-  status, a place); a newer note on the same subject replaces the older one.
-- `~/.orkmem/memo note "..."` for anything else worth keeping: a decision and its reason,
-  a result, a lesson. One line, at most 280 bytes. Do not repeat what is there.
-- `--replaces <id>` when a note corrects an earlier one; `~/.orkmem/memo drop <id> "why"`
-  when one is wrong. When `note` lists a closest earlier entry your note makes
-  outdated, drop it. A rule the user stated changes only when the user changes it.
-
-### When you need something old
-
-`~/.orkmem/memo ask <words>` lists current entries first and marks outdated ones.
-`~/.orkmem/memo open <id>` shows one entry whole, with what it replaced and what replaced it.
-
-The files in `~/.orkmem/memory` change only through the tool; it refuses a damaged memory.
-
-### Helpers you start
-
-Memory belongs to the main session. Tell any helper agent you start: `Do not run memo.`
 ```
 
 ## 📄 License
@@ -192,6 +93,4 @@ MIT. See [LICENSE](LICENSE).
 
 ## 🙏 Credits
 
-orkmem grew out of [OptMem](https://github.com/VictorTaelin/OptMem) by [Victor Taelin](https://github.com/VictorTaelin). OptMem's idea is a permanent, append-only memory that an agent uses through one small script and a short prompt.
-
-orkmem keeps that shape. It changes how memories are identified, shown and corrected, and it was written from scratch: it contains no OptMem code. `memo import` reads OptMem's `LOG.txt`, so an existing OptMem memory can move over.
+orkmem grew out of [OptMem](https://github.com/VictorTaelin/OptMem) by [Victor Taelin](https://github.com/VictorTaelin): a permanent, append-only memory that an agent uses through one small script and a short prompt. orkmem keeps that idea and was written from scratch; it contains no OptMem code.
