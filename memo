@@ -25,30 +25,78 @@ import os
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import NoReturn
 
 KNOBS = {"ENTRY_BYTES": 280, "PAGE_BYTES": 10000, "RULE_BYTES": 8000, "RECENT_LINES": 24, "ASK_LINES": 20, "HINTS": 3}
-DEFAULT_DIR = "~/.orkmem/memory"
+MEMORY_ENV, DEFAULT_DIR = "MEMORY_DIR", "~/.orkmem/memory"
 LOG, HEAD, LOCK, CONFIG = "LOG.jsonl", "HEAD", ".lock", "config"
-ID_HEX, SHORT, MIN_REF = 16, 8, 4
+OPTMEM_LOG, OPTMEM_RECORD, OPTMEM_TIME = "LOG.txt", 320, "T00:00:00+00:00"
+ID_HEX, SHORT, MIN_REF, DATE_CHARS = 16, 8, 4, 10
 FRAME_BYTES = 400
-OPTMEM_RECORD = 320
-MORE, END = "More: memo wake", "End of memory."
+ALIAS_MARK = "#"
 WORD = re.compile(r"[a-z0-9][a-z0-9_.-]{2,}")
+QUERY_SPLIT = re.compile(r"[\s|]+")
 REGEX_SIGNS = re.compile(r"[\\^$.*+?()\[\]{}]")
 TERM = re.compile(r"[a-z']+")
 FACT_ATOM = re.compile(r"\d+(?:[.,:]\d+)*|[\w.-]*[/_][\w./-]*")
 ATOM_TAIL = ".-/"
 MODAL = frozenset({"never", "no", "not", "don't", "dont", "must", "always", "only", "without"})
-EXIT_BLOCKED = 3
+EXIT_DAMAGED, EXIT_BLOCKED = 1, 3
+HOOK_EVENT, DENY, NO_DECISION = "PreToolUse", "deny", "{}"
+
+WAKE_HEAD = "orkmem, page {page} of {pages}, as of {head} ({count} entries)"
 RULES_HEAD = "RULES ({count}), newest first. Where two rules conflict, the newer one wins."
+SECTION = "{name} ({count})"
+OPEN_SECTION, NOW_SECTION, RECENT_SECTION = "OPEN", "NOW", "RECENT"
+MORE, END = "More: memo wake {page} {head}", "End of memory."
+ENTRY_LINE = "  {id} {kind}{subject} {text}  ({by}, {day}){enforced}{outdated}"
+SUBJECT_TAG, ENFORCED_TAG, OUTDATED_TAG = " {subject}:", " (enforced)", "  [outdated, now {id}]"
+AGED_LINE = "{line}  ({age})"
+SEEN_TODAY, SEEN_AGO = "seen today", "seen {days}d ago"
 TIDY_HEAD = "TIDY: rules fill {size} of {budget} bytes and these two overlap. Do this before your next action:"
 TIDY_MERGE = ('  Same rule: memo note --rule{user} --replaces {a} --replaces {b} "<one line that keeps every never, no, '
               'not, must, always and only of both>"')
 TIDY_DISTINCT = "  Different rules: memo distinct {a} {b}"
+USER_FLAG = " --user"
+SAVED, REPLACES_LINE = "Saved {id}", "  replaces {id} {text}"
+CLOSEST = 'Closest earlier. If your note makes one outdated: memo drop <id> "replaced by {id}"'
+ASK_HEAD = "{total} matches, showing {first}-{last}, current first"
+REPLACED_LINE = "      replaced {id} {text} ({day})"
+ASK_MORE = 'more: memo ask "{query}" --page {page}'
+NO_MATCH = "No match."
+OPEN_HEAD, OPEN_ALIAS = "{id}  {kind} by {by} at {at}", "  (OptMem {alias})"
+OPEN_TEXT, OPEN_FIELD, OPEN_NOW = "  {text}", "  {name}: {value}", "  now: {id} {text}"
+DROPPED = "Dropped {id} ({drop})"
+DISTINCT_TEXT = "rules {a} and {b} say different things"
+BLOCKED = "Blocked by rule {id}: {text}"
+DENY_REASON = "Memory rule {id}: {text}"
+IMPORTED = "Imported {added} new memories ({had} were already here). Restate standing rules with: memo note --rule --user"
+CONFIG_LINE = "{name:<13} {value}"
+
+NO_MEMORY = "No memory at {dir}. To create one: memo init. To use another: set MEMORY_DIR."
+DAMAGED = "The memory is damaged: {why}. Nothing was read or written. Restore LOG.jsonl from a copy that ends at HEAD."
+UNREADABLE = "unreadable line: {error}"
+BROKEN_CHAIN = "entry {n} does not follow entry {before}"
+LOST_TAIL = "HEAD {head} is not in the log: it lost its tail or was rewritten"
+AMBIGUOUS = "{ref} matches {count} entries. Use an id printed by wake, ask or note."
+ALREADY_OUTDATED = "{id} is already outdated: now {now}. Replace that one instead."
 USER_RULE = "{id} is a rule the user stated. It ends only when the user changes it: memo note --rule --user --replaces {id} \"...\""
+ONE_LINE = "A note is one non-empty line."
+TOO_LONG = "Too long: {size} bytes, limit {limit}. Split it, or say it shorter."
+FACT_FLAGS = "--subject and --open are for facts; a rule holds until replaced or dropped."
+RULE_FLAGS = "--guard is for rules."
+MERGE_DROPS = "The merge drops {words}: keep every never, no, not, must, always and only of the rules it merges."
+MERGE_ADDS = "The merge adds {atoms}, which none of the merged rules says."
+NO_TERMS = "Ask with words, for example: memo ask deploy version"
+NO_ENTRY = "No entry {head}. Run: memo wake"
+NO_PAGE = "No page {page}: the memory has {pages}. Run: memo wake"
+NOT_TWO_RULES = "distinct takes two current rules."
+GUARD_FAILED = "orkmem guard could not check this action ({error}). Denying rather than failing open."
+CONFIG_USAGE = "usage: memo config NAME=NUMBER, NAME one of {names}"
+UNKNOWN_ARGS = "unrecognized arguments: {args}"
 
 
 class Kind(str, Enum):
@@ -67,12 +115,12 @@ class Damaged(Exception):
 
 @dataclass(frozen=True)
 class Entry:
-    n: int
-    prev: str
     at: str
     kind: Kind
     by: By
     text: str
+    n: int = 0
+    prev: str = ""
     subject: str | None = None
     until: str | None = None  # written by the first release; kept so those entries still verify
     guard: str | None = None
@@ -89,16 +137,42 @@ class Entry:
 
     @property
     def day(self) -> str:
-        return self.at[:10]
+        return self.at[:DATE_CHARS]
+
+    @property
+    def short(self) -> str:
+        return self.id[:SHORT]
 
     @staticmethod
     def parse(line: str) -> "Entry":
         try:
             raw = json.loads(line)
-            return Entry(**{**raw, "kind": Kind(raw["kind"]), "by": By(raw["by"]), "replaces": tuple(raw.get("replaces", ())),
-                            "pair": tuple(raw.get("pair", ()))})
+            return Entry(**{**raw, "kind": Kind(raw["kind"]), "by": By(raw["by"]),
+                            "replaces": tuple(raw.get("replaces", ())), "pair": tuple(raw.get("pair", ()))})
         except (ValueError, TypeError, KeyError) as e:
-            raise Damaged(f"unreadable line: {e}") from e
+            raise Damaged(UNREADABLE.format(error=e)) from e
+
+
+class Args(argparse.Namespace):
+    cmd: str
+    page: int
+    head: str | None
+    text: str
+    rule: bool
+    user: bool
+    open: bool
+    subject: str | None
+    guard: str | None
+    replaces: list[str]
+    query: list[str]
+    ref: str
+    around: int
+    why: str
+    first: str
+    second: str
+    action: list[str]
+    optmem_dir: str
+    pairs: list[str]
 
 
 def digest(body: dict[str, object]) -> str:
@@ -112,17 +186,27 @@ def now() -> str:
 
 def die(msg: str) -> NoReturn:
     print(msg, file=sys.stderr)
-    sys.exit(1)
+    sys.exit(EXIT_DAMAGED)
+
+
+def emit(lines: Iterable[str]) -> None:
+    text = "\n".join(lines)
+    if text:
+        print(text)
 
 
 def home(path: str) -> str:
     return path.replace(os.path.expanduser("~"), "~", 1)
 
 
+def memory_dir() -> str:
+    return os.path.expanduser(os.environ.get(MEMORY_ENV) or DEFAULT_DIR)
+
+
 def store() -> str:
-    d = os.path.expanduser(os.environ.get("MEMORY_DIR") or DEFAULT_DIR)
+    d = memory_dir()
     if not os.path.isfile(os.path.join(d, LOG)):
-        die(f"No memory at {d}. To create one: memo init. To use another: set MEMORY_DIR.")
+        die(NO_MEMORY.format(dir=d))
     return d
 
 
@@ -146,10 +230,10 @@ def read(d: str) -> list[Entry]:
     prev = ""
     for i, e in enumerate(entries):
         if e.n != i or e.prev != prev or digest(e.body()) != e.id:
-            raise Damaged(f"entry {i} does not follow entry {i - 1}")
+            raise Damaged(BROKEN_CHAIN.format(n=i, before=i - 1))
         prev = e.id
     if head and head not in {e.id for e in entries}:
-        raise Damaged(f"HEAD {head} is not in the log: it lost its tail or was rewritten")
+        raise Damaged(LOST_TAIL.format(head=head))
     return entries
 
 
@@ -215,26 +299,27 @@ class Memory:
         return e
 
     def resolve(self, ref: str) -> Entry:
-        hits = [e for e in self.entries if (e.alias == ref if ref.startswith("#") else len(ref) >= MIN_REF and e.id.startswith(ref))]
+        by_alias = ref.startswith(ALIAS_MARK)
+        hits = [e for e in self.entries if (e.alias == ref if by_alias else len(ref) >= MIN_REF and e.id.startswith(ref))]
         if len(hits) != 1:
-            die(f"{ref} matches {len(hits)} entries. Use an id printed by wake, ask or note.")
+            die(AMBIGUOUS.format(ref=ref, count=len(hits)))
         return hits[0]
 
-
-def today() -> str:
-    return now()[:10]
+    def current_or_die(self, e: Entry) -> None:
+        if not self.current(e):
+            die(ALREADY_OUTDATED.format(id=e.short, now=self.final(e).short))
 
 
 def age(e: Entry) -> str:
-    days = (datetime.date.fromisoformat(today()) - datetime.date.fromisoformat(e.day)).days
-    return "seen today" if days == 0 else f"seen {days}d ago"
+    days = (datetime.date.fromisoformat(now()[:DATE_CHARS]) - datetime.date.fromisoformat(e.day)).days
+    return SEEN_TODAY if days == 0 else SEEN_AGO.format(days=days)
 
 
 def show(e: Entry, mem: Memory) -> str:
-    subject = f" {e.subject}:" if e.subject else ""
-    enforced = " (enforced)" if e.guard else ""
-    outdated = "" if mem.current(e) else f"  [outdated, now {mem.final(e).id[:SHORT]}]"
-    return f"  {e.id[:SHORT]} {e.kind.value}{subject} {e.text}  ({e.by.value}, {e.day}){enforced}{outdated}"
+    return ENTRY_LINE.format(
+        id=e.short, kind=e.kind.value, subject=SUBJECT_TAG.format(subject=e.subject) if e.subject else "", text=e.text,
+        by=e.by.value, day=e.day, enforced=ENFORCED_TAG if e.guard else "",
+        outdated="" if mem.current(e) else OUTDATED_TAG.format(id=mem.final(e).short))
 
 
 def pages(lines: list[str], budget: int) -> list[list[str]]:
@@ -248,33 +333,6 @@ def pages(lines: list[str], budget: int) -> list[list[str]]:
         out[-1].append(line)
         size += n
     return out
-
-
-def cmd_wake(d: str, a: argparse.Namespace) -> None:
-    k, entries = knobs(d), read(d)
-    if a.head:
-        cut = [i for i, e in enumerate(entries) if e.id == a.head]
-        if not cut:
-            die(f"No entry {a.head}. Run: memo wake")
-        entries = entries[: cut[0] + 1]
-    mem = Memory.fold(entries)
-    live = [e for e in entries if mem.current(e) and e.kind is Kind.FACT]
-    opened = [e for e in live if e.open]
-    facts = sorted((e for e in live if e.subject and not e.open), key=lambda e: e.subject or "")
-    recent = [e for e in entries if not e.drop][-k["RECENT_LINES"]:]
-    rules = mem.rules()
-    lines = [RULES_HEAD.format(count=len(rules)), *(show(e, mem) for e in rules)]
-    lines += [f"OPEN ({len(opened)})", *(show(e, mem) for e in opened)]
-    lines += [f"NOW ({len(facts)})", *(f"{show(e, mem)}  ({age(e)})" for e in facts)]
-    lines += [f"RECENT ({len(recent)})", *(show(e, mem) for e in recent)]
-    lines += tidy_lines(mem, k["RULE_BYTES"])
-    book = pages(lines, k["PAGE_BYTES"])
-    if not 1 <= a.page <= len(book):
-        die(f"No page {a.page}: the memory has {len(book)}. Run: memo wake")
-    head = entries[-1].id if entries else "-"
-    print(f"orkmem, page {a.page} of {len(book)}, as of {head} ({len(entries)} entries)")
-    print("\n".join(book[a.page - 1]))
-    print(f"{MORE} {a.page + 1} {head}" if a.page < len(book) else END)
 
 
 def words(text: str) -> set[str]:
@@ -303,10 +361,9 @@ def tidy_lines(mem: Memory, budget: int) -> list[str]:
     if best is None or best[0] <= 0:
         return []
     _, a, b = best
-    user = " --user" if By.USER in (a.by, b.by) else ""
-    ids = {"a": a.id[:SHORT], "b": b.id[:SHORT]}
+    user = USER_FLAG if By.USER in (a.by, b.by) else ""
     return [TIDY_HEAD.format(size=size, budget=budget), show(a, mem), show(b, mem),
-            TIDY_MERGE.format(user=user, **ids), TIDY_DISTINCT.format(**ids)]
+            TIDY_MERGE.format(user=user, a=a.short, b=b.short), TIDY_DISTINCT.format(a=a.short, b=b.short)]
 
 
 def merge_problem(text: str, olds: tuple[Entry, ...]) -> str | None:
@@ -314,68 +371,93 @@ def merge_problem(text: str, olds: tuple[Entry, ...]) -> str | None:
     known = {m.lower().rstrip(ATOM_TAIL) for o in olds for m in FACT_ATOM.findall(o.text)}
     invented = {m.lower().rstrip(ATOM_TAIL) for m in FACT_ATOM.findall(text)} - known
     if lost:
-        return f"The merge drops {', '.join(sorted(lost))}: keep every never, no, not, must, always and only of the rules it merges."
+        return MERGE_DROPS.format(words=", ".join(sorted(lost)))
     if invented:
-        return f"The merge adds {', '.join(sorted(invented))}, which none of the merged rules says."
+        return MERGE_ADDS.format(atoms=", ".join(sorted(invented)))
     return None
 
 
 def check_text(text: str, limit: int) -> str:
     text = text.strip()
     if not text or "\n" in text or "\r" in text:
-        die("A note is one non-empty line.")
+        die(ONE_LINE)
     if len(text.encode()) > limit:
-        die(f"Too long: {len(text.encode())} bytes, limit {limit}. Split it, or say it shorter.")
+        die(TOO_LONG.format(size=len(text.encode()), limit=limit))
     return text
 
 
-def cmd_note(d: str, a: argparse.Namespace) -> None:
+def cmd_wake(d: str, args: Args) -> None:
+    k, entries = knobs(d), read(d)
+    if args.head:
+        cut = [i for i, e in enumerate(entries) if e.id == args.head]
+        if not cut:
+            die(NO_ENTRY.format(head=args.head))
+        entries = entries[: cut[0] + 1]
+    mem = Memory.fold(entries)
+    facts = [e for e in entries if mem.current(e) and e.kind is Kind.FACT]
+    opened = [e for e in facts if e.open]
+    latest = sorted((e for e in facts if e.subject and not e.open), key=lambda e: e.subject or "")
+    recent = [e for e in entries if not e.drop][-k["RECENT_LINES"]:]
+    rules = mem.rules()
+    lines = [RULES_HEAD.format(count=len(rules)), *(show(e, mem) for e in rules)]
+    lines += [SECTION.format(name=OPEN_SECTION, count=len(opened)), *(show(e, mem) for e in opened)]
+    lines += [SECTION.format(name=NOW_SECTION, count=len(latest)), *(AGED_LINE.format(line=show(e, mem), age=age(e)) for e in latest)]
+    lines += [SECTION.format(name=RECENT_SECTION, count=len(recent)), *(show(e, mem) for e in recent)]
+    lines += tidy_lines(mem, k["RULE_BYTES"])
+    book = pages(lines, k["PAGE_BYTES"])
+    if not 1 <= args.page <= len(book):
+        die(NO_PAGE.format(page=args.page, pages=len(book)))
+    head = entries[-1].id if entries else "-"
+    print(WAKE_HEAD.format(page=args.page, pages=len(book), head=head, count=len(entries)))
+    print("\n".join(book[args.page - 1]))
+    print(MORE.format(page=args.page + 1, head=head) if args.page < len(book) else END)
+
+
+def cmd_note(d: str, args: Args) -> None:
     k, entries = knobs(d), read(d)
     mem = Memory.fold(entries)
-    kind = Kind.RULE if a.rule else Kind.FACT
-    if kind is Kind.RULE and (a.subject or a.open):
-        die("--subject and --open are for facts; a rule holds until replaced or dropped.")
-    if kind is Kind.FACT and a.guard:
-        die("--guard is for rules.")
-    if a.guard:
-        re.compile(a.guard)
-    targets = tuple(mem.resolve(r) for r in a.replaces)
+    kind = Kind.RULE if args.rule else Kind.FACT
+    if kind is Kind.RULE and (args.subject or args.open):
+        die(FACT_FLAGS)
+    if kind is Kind.FACT and args.guard:
+        die(RULE_FLAGS)
+    if args.guard:
+        re.compile(args.guard)
+    targets = tuple(mem.resolve(r) for r in args.replaces)
     for t in targets:
-        if not mem.current(t):
-            die(f"{t.id[:SHORT]} is already outdated: now {mem.final(t).id[:SHORT]}. Replace that one instead.")
-        if t.kind is Kind.RULE and t.by is By.USER and not a.user:
-            die(USER_RULE.format(id=t.id[:SHORT]))
-    text = check_text(a.text, k["ENTRY_BYTES"])
-    merged = [t for t in targets if t.kind is Kind.RULE]
-    problem = merge_problem(text, targets) if kind is Kind.RULE and len(merged) > 1 else None
-    if problem:
-        die(problem)
-    draft = Entry(0, "", now(), kind, By.USER if a.user else By.AGENT, text, a.subject, None, a.guard, a.open, False, tuple(t.id for t in targets))
+        mem.current_or_die(t)
+        if t.kind is Kind.RULE and t.by is By.USER and not args.user:
+            die(USER_RULE.format(id=t.short))
+    text = check_text(args.text, k["ENTRY_BYTES"])
+    if kind is Kind.RULE and sum(t.kind is Kind.RULE for t in targets) > 1:
+        problem = merge_problem(text, targets)
+        if problem:
+            die(problem)
+    by = By.USER if args.user else By.AGENT
+    draft = Entry(now(), kind, by, text, subject=args.subject, guard=args.guard, open=args.open, replaces=tuple(t.id for t in targets))
     e = append(d, [draft])[0]
     after = Memory.fold([*entries, e])
-    print(f"Saved {e.id}")
-    for old in (x for x in entries if after.replaced_by.get(x.id) == e.id):
-        print(f"  replaces {old.id[:SHORT]} {old.text}")
+    print(SAVED.format(id=e.id))
+    emit(REPLACES_LINE.format(id=old.short, text=old.text) for old in entries if after.replaced_by.get(old.id) == e.id)
     near = closest([x for x in entries if after.current(x) and x.kind is kind], e.text, k["HINTS"])
     if near:
-        print(f'Closest earlier. If your note makes one outdated: memo drop <id> "replaced by {e.id[:SHORT]}"')
-        print("\n".join(show(x, after) for x in near))
-    print("\n".join(tidy_lines(after, k["RULE_BYTES"])))
+        emit([CLOSEST.format(id=e.short), *(show(x, after) for x in near)])
+    emit(tidy_lines(after, k["RULE_BYTES"]))
 
 
-def cmd_ask(d: str, a: argparse.Namespace) -> None:
+def cmd_ask(d: str, args: Args) -> None:
     k, entries = knobs(d), read(d)
     mem = Memory.fold(entries)
-    terms = {REGEX_SIGNS.sub("", t) for q in a.query for t in re.split(r"[\s|]+", q.lower()) if not t.startswith("-")} - {""}
+    terms = {REGEX_SIGNS.sub("", t) for q in args.query for t in QUERY_SPLIT.split(q.lower()) if not t.startswith("-")} - {""}
     if not terms:
-        die("Ask with words, for example: memo ask deploy version")
+        die(NO_TERMS)
 
     def score(e: Entry) -> int:
         return sum(t in f"{e.text} {e.subject or ''}".lower() for t in terms)
 
     hits = [e for s, e in sorted(((score(e), e) for e in entries if not e.drop), key=lambda x: (-x[0], -x[1].n)) if s > 0]
     if not hits:
-        print("No match.")
+        print(NO_MATCH)
         return
     shown = {e.id for e in hits if mem.current(e)}
     under: dict[str, list[Entry]] = {}
@@ -386,55 +468,50 @@ def cmd_ask(d: str, a: argparse.Namespace) -> None:
             under.setdefault(final.id, []).append(e)
         else:
             items.append(e)
-    per, first = k["ASK_LINES"], (a.page - 1) * k["ASK_LINES"]
+    per = k["ASK_LINES"]
+    first = (args.page - 1) * per
     page = items[first: first + per]
-    print(f"{len(hits)} matches, showing {first + 1}-{first + len(page)}, current first")
+    print(ASK_HEAD.format(total=len(hits), first=first + 1, last=first + len(page)))
     for e in page:
         print(show(e, mem))
-        for old in under.get(e.id, []):
-            print(f"      replaced {old.id[:SHORT]} {old.text} ({old.day})")
+        emit(REPLACED_LINE.format(id=old.short, text=old.text, day=old.day) for old in under.get(e.id, []))
     if first + per < len(items):
-        print(f'more: memo ask "{" ".join(a.query)}" --page {a.page + 1}')
+        print(ASK_MORE.format(query=" ".join(args.query), page=args.page + 1))
 
 
-def cmd_open(d: str, a: argparse.Namespace) -> None:
+def cmd_open(d: str, args: Args) -> None:
     entries = read(d)
     mem = Memory.fold(entries)
-    e = mem.resolve(a.ref)
-    print(f"{e.id}  {e.kind.value} by {e.by.value} at {e.at}" + (f"  (OptMem {e.alias})" if e.alias else ""))
-    print(f"  {e.text}")
-    for name in ("subject", "guard"):
-        if getattr(e, name):
-            print(f"  {name}: {getattr(e, name)}")
+    e = mem.resolve(args.ref)
+    print(OPEN_HEAD.format(id=e.id, kind=e.kind.value, by=e.by.value, at=e.at) + (OPEN_ALIAS.format(alias=e.alias) if e.alias else ""))
+    print(OPEN_TEXT.format(text=e.text))
+    emit(OPEN_FIELD.format(name=name, value=value) for name, value in (("subject", e.subject), ("guard", e.guard)) if value)
     if not mem.current(e):
-        print(f"  now: {mem.final(e).id[:SHORT]} {mem.final(e).text}")
-    for old in (x for x in entries if mem.replaced_by.get(x.id) == e.id):
-        print(f"  replaced {old.id[:SHORT]} {old.text} ({old.day})")
-    for x in entries[max(0, e.n - a.around): e.n + a.around + 1] if a.around else []:
-        print(show(x, mem))
+        print(OPEN_NOW.format(id=mem.final(e).short, text=mem.final(e).text))
+    emit(REPLACED_LINE.format(id=old.short, text=old.text, day=old.day) for old in entries if mem.replaced_by.get(old.id) == e.id)
+    if args.around:
+        emit(show(x, mem) for x in entries[max(0, e.n - args.around): e.n + args.around + 1])
 
 
-def cmd_drop(d: str, a: argparse.Namespace) -> None:
+def cmd_drop(d: str, args: Args) -> None:
     mem = Memory.fold(read(d))
-    target = mem.resolve(a.ref)
-    if not mem.current(target):
-        die(f"{target.id[:SHORT]} is already outdated: now {mem.final(target).id[:SHORT]}.")
+    target = mem.resolve(args.ref)
+    mem.current_or_die(target)
     if target.kind is Kind.RULE and target.by is By.USER:
-        die(USER_RULE.format(id=target.id[:SHORT]))
-    why = check_text(a.why, knobs(d)["ENTRY_BYTES"])
-    e = append(d, [Entry(0, "", now(), target.kind, By.AGENT, why, drop=True, replaces=(target.id,))])[0]
-    print(f"Dropped {target.id[:SHORT]} ({e.id})")
+        die(USER_RULE.format(id=target.short))
+    why = check_text(args.why, knobs(d)["ENTRY_BYTES"])
+    e = append(d, [Entry(now(), target.kind, By.AGENT, why, drop=True, replaces=(target.id,))])[0]
+    print(DROPPED.format(id=target.short, drop=e.id))
 
 
-def cmd_distinct(d: str, a: argparse.Namespace) -> None:
+def cmd_distinct(d: str, args: Args) -> None:
     mem = Memory.fold(read(d))
-    pair = (mem.resolve(a.a), mem.resolve(a.b))
-    if not all(e.kind is Kind.RULE and mem.current(e) for e in pair):
-        die("distinct takes two current rules.")
-    text = f"rules {pair[0].id[:SHORT]} and {pair[1].id[:SHORT]} say different things"
-    e = append(d, [Entry(0, "", now(), Kind.FACT, By.AGENT, text, pair=tuple(x.id for x in pair))])[0]
-    print(f"Saved {e.id}")
-    print("\n".join(tidy_lines(Memory.fold([*mem.entries, e]), knobs(d)["RULE_BYTES"])))
+    a, b = mem.resolve(args.first), mem.resolve(args.second)
+    if not all(e.kind is Kind.RULE and mem.current(e) for e in (a, b)):
+        die(NOT_TWO_RULES)
+    e = append(d, [Entry(now(), Kind.FACT, By.AGENT, DISTINCT_TEXT.format(a=a.short, b=b.short), pair=(a.id, b.id))])[0]
+    print(SAVED.format(id=e.id))
+    emit(tidy_lines(Memory.fold([*mem.entries, e]), knobs(d)["RULE_BYTES"]))
 
 
 def blocking(d: str, action: str) -> list[Entry]:
@@ -442,27 +519,27 @@ def blocking(d: str, action: str) -> list[Entry]:
     return [e for e in mem.entries if mem.current(e) and e.guard and re.search(e.guard, action, re.IGNORECASE)]
 
 
-def cmd_guard(d: str, a: argparse.Namespace) -> None:
-    if a.action:
-        hits = blocking(d, " ".join(a.action))
-        for e in hits:
-            print(f"Blocked by rule {e.id[:SHORT]}: {e.text}")
+def cmd_guard(d: str, args: Args) -> None:
+    if args.action:
+        hits = blocking(d, " ".join(args.action))
+        emit(BLOCKED.format(id=e.short, text=e.text) for e in hits)
         sys.exit(EXIT_BLOCKED if hits else 0)
     try:
         tool_input = json.loads(sys.stdin.read())["tool_input"]
         command = tool_input.get("command")
         hits = blocking(d, command if isinstance(command, str) else json.dumps(tool_input))
-        reason = "; ".join(f"Memory rule {e.id[:SHORT]}: {e.text}" for e in hits)
+        reason = "; ".join(DENY_REASON.format(id=e.short, text=e.text) for e in hits)
     except (ValueError, KeyError, TypeError, Damaged) as err:
-        reason = f"orkmem guard could not check this action ({err}). Denying rather than failing open."
+        reason = GUARD_FAILED.format(error=err)
     if not reason:
-        print("{}")
+        print(NO_DECISION)
         return
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+    decision = {"hookEventName": HOOK_EVENT, "permissionDecision": DENY, "permissionDecisionReason": reason}
+    print(json.dumps({"hookSpecificOutput": decision}))
 
 
-def cmd_import(d: str, a: argparse.Namespace) -> None:
-    with open(os.path.join(a.optmem_dir, "LOG.txt"), "rb") as f:
+def cmd_import(d: str, args: Args) -> None:
+    with open(os.path.join(args.optmem_dir, OPTMEM_LOG), "rb") as f:
         data = f.read()
     have = {e.alias for e in read(d) if e.alias}
     drafts = []
@@ -470,21 +547,21 @@ def cmd_import(d: str, a: argparse.Namespace) -> None:
         alias, _, rest = data[i * OPTMEM_RECORD: (i + 1) * OPTMEM_RECORD].decode().rstrip().partition(" ")
         day, _, text = rest.partition(" ")
         if alias not in have:
-            drafts.append(Entry(0, "", f"{day}T00:00:00+00:00", Kind.FACT, By.AGENT, text, alias=alias))
+            drafts.append(Entry(day + OPTMEM_TIME, Kind.FACT, By.AGENT, text, alias=alias))
     added = append(d, drafts) if drafts else []
-    print(f"Imported {len(added)} new memories ({len(have)} were already here). Restate standing rules with: memo note --rule --user")
+    print(IMPORTED.format(added=len(added), had=len(have)))
 
 
-def cmd_config(d: str, a: argparse.Namespace) -> None:
+def cmd_config(d: str, args: Args) -> None:
     k = knobs(d)
-    for pair in a.set:
+    for pair in args.pairs:
         name, _, value = pair.partition("=")
         if name not in KNOBS or not value.isdigit():
-            die(f"usage: memo config NAME=NUMBER, NAME one of {', '.join(KNOBS)}")
+            die(CONFIG_USAGE.format(names=", ".join(KNOBS)))
         k[name] = int(value)
-    if a.set:
+    if args.pairs:
         sync_write(os.path.join(d, CONFIG), "".join(f"{name}={value}\n" for name, value in k.items()))
-    print("\n".join(f"{name:<13} {value}" for name, value in k.items()))
+    emit(CONFIG_LINE.format(name=name, value=value) for name, value in k.items())
 
 
 TEMPLATE = """\
@@ -525,15 +602,17 @@ Memory belongs to the main session. Tell any helper agent you start: `Do not run
 
 
 def cmd_init() -> None:
-    d = os.path.expanduser(os.environ.get("MEMORY_DIR") or DEFAULT_DIR)
+    d = memory_dir()
     os.makedirs(d, exist_ok=True)
     for name in (LOG, HEAD):
         open(os.path.join(d, name), "a").close()
     print(TEMPLATE.format(memo=home(os.path.realpath(__file__)), data=home(d), chars=knobs(d)["ENTRY_BYTES"]))
 
 
-COMMANDS = {"wake": cmd_wake, "note": cmd_note, "ask": cmd_ask, "open": cmd_open, "drop": cmd_drop,
-            "distinct": cmd_distinct, "guard": cmd_guard, "import": cmd_import, "config": cmd_config}
+COMMANDS: dict[str, Callable[[str, Args], None]] = {
+    "wake": cmd_wake, "note": cmd_note, "ask": cmd_ask, "open": cmd_open, "drop": cmd_drop,
+    "distinct": cmd_distinct, "guard": cmd_guard, "import": cmd_import, "config": cmd_config,
+}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -560,26 +639,26 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("ref")
     r.add_argument("why")
     s = sub.add_parser("distinct")
-    s.add_argument("a")
-    s.add_argument("b")
+    s.add_argument("first")
+    s.add_argument("second")
     sub.add_parser("guard").add_argument("action", nargs="*")
     sub.add_parser("import").add_argument("optmem_dir")
-    sub.add_parser("config").add_argument("set", nargs="*")
+    sub.add_parser("config").add_argument("pairs", nargs="*")
     return p
 
 
 def main() -> None:
     p = parser()
-    a, extra = p.parse_known_args()
-    if extra and a.cmd != "ask":
-        p.error(f"unrecognized arguments: {' '.join(extra)}")
-    if a.cmd == "init":
+    args, extra = p.parse_known_args(namespace=Args())
+    if extra and args.cmd != "ask":
+        p.error(UNKNOWN_ARGS.format(args=" ".join(extra)))
+    if args.cmd == "init":
         cmd_init()
         return
     try:
-        COMMANDS[a.cmd](store(), a)
+        COMMANDS[args.cmd](store(), args)
     except Damaged as e:
-        die(f"The memory is damaged: {e}. Nothing was read or written. Restore {LOG} from a copy that ends at HEAD.")
+        die(DAMAGED.format(why=e))
 
 
 if __name__ == "__main__":
