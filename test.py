@@ -111,15 +111,17 @@ class Invariants(unittest.TestCase):
         self.assertNotIn(TIDY, self.s.wake())
 
     def test_a_merge_may_not_lose_a_never_or_invent_a_fact(self) -> None:
-        a = self.s.note("--rule", "--user", "never merge without the user's OK")
+        a = self.s.note("--rule", "--user", "never merge without the user's OK in docs/review.md.")
         b = self.s.note("--rule", "--user", "never merge before the checks pass")
-        cases = [("drops never", "merge after the checks pass and the user's OK"),
-                 ("invents a number", "never merge before 3 checks pass or without the user's OK")]
+        cases = [("drops never", "merge after the checks pass and the user's OK in docs/review.md"),
+                 ("invents a number", "never merge before 3 checks pass or without the user's OK in docs/review.md")]
         for name, text in cases:
             with self.subTest(name):
                 out = self.s.run("note", "--rule", "--user", "--replaces", a[:8], "--replaces", b[:8], text, ok=False)
                 self.assertIn("merge", out.stderr)
                 self.assertNotEqual(out.returncode, 0)
+        self.s.note("--rule", "--user", "--replaces", a[:8], "--replaces", b[:8],
+                    "never merge before the checks pass, or without the user's OK in docs/review.md;")
 
     def test_only_the_user_ends_a_user_rule(self) -> None:
         rule = self.s.note("--rule", "--user", "no subagents")

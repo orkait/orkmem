@@ -40,6 +40,7 @@ WORD = re.compile(r"[a-z0-9][a-z0-9_.-]{2,}")
 REGEX_SIGNS = re.compile(r"[\\^$.*+?()\[\]{}]")
 TERM = re.compile(r"[a-z']+")
 FACT_ATOM = re.compile(r"\d+(?:[.,:]\d+)*|[\w.-]*[/_][\w./-]*")
+ATOM_TAIL = ".-/"
 MODAL = frozenset({"never", "no", "not", "don't", "dont", "must", "always", "only", "without"})
 EXIT_BLOCKED = 3
 RULES_HEAD = "RULES ({count}), newest first. Where two rules conflict, the newer one wins."
@@ -310,8 +311,8 @@ def tidy_lines(mem: Memory, budget: int) -> list[str]:
 
 def merge_problem(text: str, olds: tuple[Entry, ...]) -> str | None:
     lost = {t for o in olds for t in TERM.findall(o.text.lower()) if t in MODAL} - set(TERM.findall(text.lower()))
-    known = {m.lower() for o in olds for m in FACT_ATOM.findall(o.text)}
-    invented = {m.lower() for m in FACT_ATOM.findall(text)} - known
+    known = {m.lower().rstrip(ATOM_TAIL) for o in olds for m in FACT_ATOM.findall(o.text)}
+    invented = {m.lower().rstrip(ATOM_TAIL) for m in FACT_ATOM.findall(text)} - known
     if lost:
         return f"The merge drops {', '.join(sorted(lost))}: keep every never, no, not, must, always and only of the rules it merges."
     if invented:
