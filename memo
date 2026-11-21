@@ -44,6 +44,7 @@ TERM = re.compile(r"[a-z']+")
 FACT_ATOM = re.compile(r"\d+(?:[.,:]\d+)*|[\w.-]*[/_][\w./-]*")
 ATOM_TAIL = ".-/"
 MODAL = frozenset({"never", "no", "not", "don't", "dont", "must", "always", "only", "without"})
+MERGE_OVERLAP = 0.25
 EXIT_DAMAGED, EXIT_BLOCKED = 1, 3
 HOOK_EVENT, DENY, NO_DECISION = "PreToolUse", "deny", "{}"
 
@@ -355,10 +356,14 @@ def tidy_lines(mem: Memory, budget: int) -> list[str]:
     if size <= budget:
         return []
     df = Counter(w for e in rules for w in words(e.text))
-    pairs = [(overlap(df, len(rules), a.text, b.text), a, b) for i, a in enumerate(rules) for b in rules[i + 1:]
-             if frozenset((a.id, b.id)) not in mem.distinct]
+    mass = {e.id: overlap(df, len(rules), e.text, e.text) for e in rules}
+
+    def shared(a: Entry, b: Entry) -> float:
+        return overlap(df, len(rules), a.text, b.text) / max(min(mass[a.id], mass[b.id]), sys.float_info.min)
+
+    pairs = [(shared(a, b), a, b) for i, a in enumerate(rules) for b in rules[i + 1:] if frozenset((a.id, b.id)) not in mem.distinct]
     best = max(pairs, key=lambda p: p[0], default=None)
-    if best is None or best[0] <= 0:
+    if best is None or best[0] < MERGE_OVERLAP:
         return []
     _, a, b = best
     user = USER_FLAG if By.USER in (a.by, b.by) else ""

@@ -7,7 +7,7 @@ One Python file, no dependencies.
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
-![tests: 14 invariants](https://img.shields.io/badge/tests-14%20invariants-0f766e)
+![tests: 15 invariants](https://img.shields.io/badge/tests-15%20invariants-0f766e)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -58,6 +58,7 @@ Rules are shown whole, so the tool keeps them few instead of shortening them. No
 | Step | What happens |
 |---|---|
 | Budget | When the active rules take more than `RULE_BYTES` (8,000 by default), `wake` and `note` end with a TIDY request naming the two rules that overlap most |
+| Only real overlap | A pair is offered only when it shares at least a quarter of the smaller rule's rare words. Rules that stay over budget without such a pair are kept whole, on more pages |
 | The agent decides | If they say the same thing, it writes one rule that replaces both; if not, it runs `memo distinct`, and that pair is never offered again |
 | The tool checks | A merge is refused when it loses a never, no, not, must, always or only of the rules it merges, or adds a number, path or identifier none of them holds |
 | Nothing is lost | The merged rules stay in the log; `memo open` on the merged rule lists them |
@@ -130,12 +131,12 @@ Set `$MEMORY_DIR` to keep the memory elsewhere. Only `memo init` creates a memor
 python3 test.py
 ```
 
-The suite runs the real command line against temporary memories and checks 14 invariants:
+The suite runs the real command line against temporary memories and checks 15 invariants:
 
 | Area | What is checked |
 |---|---|
 | Rules | They stay whole after 3,000 imported entries; replaced and dropped rules leave the list; only the user ends a user rule |
-| Tidy | Over budget, the two overlapping rules are offered until merged or marked distinct; a merge that loses a never or invents a fact is refused |
+| Tidy | Over budget, the two overlapping rules are offered until merged or marked distinct; rules that barely overlap are never offered; a merge that loses a never or invents a fact is refused |
 | Facts | Only the newest fact per subject is current |
 | Damage | Edited, truncated and reordered logs are refused; a torn write is repaired |
 | Concurrency | 8 parallel writers neither fork nor lose an entry |

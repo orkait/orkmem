@@ -110,6 +110,13 @@ class Invariants(unittest.TestCase):
         self.s.run("distinct", c[:8], d[:8])
         self.assertNotIn(TIDY, self.s.wake())
 
+    def test_rules_that_barely_overlap_are_never_offered(self) -> None:
+        self.s.run("config", f"RULE_BYTES={TIGHT_RULE_BYTES}")
+        self.s.note("--rule", "--user", "never deploy the trends engine on a Friday evening")
+        self.s.note("--rule", "--user", "write every price shown to brands in rupees with tax")
+        self.s.note("--rule", "--user", "keep design reviews short and send screenshots of the engine")
+        self.assertNotIn(TIDY, self.s.wake())
+
     def test_a_merge_may_not_lose_a_never_or_invent_a_fact(self) -> None:
         a = self.s.note("--rule", "--user", "never merge without the user's OK in docs/review.md.")
         b = self.s.note("--rule", "--user", "never merge before the checks pass")
