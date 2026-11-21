@@ -91,6 +91,8 @@ class Invariants(unittest.TestCase):
         self.assertIn(b[:8], rules)
         self.assertNotIn(a[:8], rules)
         self.assertNotIn(c[:8], rules)
+        again = self.s.run("note", "--rule", "--replaces", a[:8], "a second successor", ok=False)
+        self.assertIn("already outdated", again.stderr)
 
     def test_expired_rule_is_surfaced_for_the_user(self) -> None:
         self.s.note("--rule", "--until", "2020-01-01", "for now, no paid tests")
