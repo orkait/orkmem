@@ -8,7 +8,7 @@
   memo open <id>             one entry whole, with what it replaced and what replaced it
   memo drop <id> "why"       retire an entry that is wrong or outdated
   memo guard [action]        does an active rule forbid this action (hook: JSON on stdin)
-  memo import <optmem-dir>   load an OptMem memory (LOG.txt) into an empty orkmem memory
+  memo import <optmem-dir>   add the OptMem memories (LOG.txt) not imported yet
   memo config [NAME=VALUE]   show or change the sizes
 
 The memory lives in ~/.orkmem/memory, or in $MEMORY_DIR if set.
@@ -396,16 +396,17 @@ def cmd_guard(d: str, a: argparse.Namespace) -> None:
 
 
 def cmd_import(d: str, a: argparse.Namespace) -> None:
-    if read(d):
-        die("This memory is not empty. Import into a fresh one (memo init with a new MEMORY_DIR).")
     with open(os.path.join(a.optmem_dir, "LOG.txt"), "rb") as f:
         data = f.read()
+    have = {e.alias for e in read(d) if e.alias}
     drafts = []
     for i in range(len(data) // OPTMEM_RECORD):
         alias, _, rest = data[i * OPTMEM_RECORD: (i + 1) * OPTMEM_RECORD].decode().rstrip().partition(" ")
         day, _, text = rest.partition(" ")
-        drafts.append(Entry(0, "", f"{day}T00:00:00+00:00", Kind.FACT, By.AGENT, text, alias=alias))
-    print(f"Imported {len(append(d, drafts))} memories. Restate the user's standing rules with: memo note --rule --user")
+        if alias not in have:
+            drafts.append(Entry(0, "", f"{day}T00:00:00+00:00", Kind.FACT, By.AGENT, text, alias=alias))
+    added = append(d, drafts) if drafts else []
+    print(f"Imported {len(added)} new memories ({len(have)} were already here). Restate standing rules with: memo note --rule --user")
 
 
 def cmd_config(d: str, a: argparse.Namespace) -> None:

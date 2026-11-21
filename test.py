@@ -66,16 +66,11 @@ class Invariants(unittest.TestCase):
 
     def test_rules_stay_whole_however_much_follows(self) -> None:
         rule = "Never merge design changes without the user's OK"
-        old = optmem_log(os.path.join(self.s.tmp.name, "optmem"), [f"fact number {i} about the deploy" for i in range(BULK)])
+        self.s.run("import", optmem_log(os.path.join(self.s.tmp.name, "optmem"), [f"fact {i} about the deploy" for i in range(BULK)]))
         self.s.note("--rule", "--user", rule)
-        self.assertIn("not empty", self.s.run("import", old, ok=False).stderr)
-        fresh = Store()
-        fresh.run("import", old)
-        fresh.note("--rule", "--user", rule)
         for i in range(30):
-            fresh.note(f"later fact {i}")
-        self.assertIn(rule, fresh.wake().split("RECENT")[0])
-        fresh.tmp.cleanup()
+            self.s.note(f"later fact {i}")
+        self.assertIn(rule, self.s.wake().split("RECENT")[0])
 
     def test_newest_fact_per_subject_is_the_only_current_one(self) -> None:
         old = self.s.note("--subject", "app.live", "live version is 77685930d")
@@ -193,8 +188,16 @@ class Invariants(unittest.TestCase):
         self.assertNotEqual(out.returncode, 0)
         self.assertFalse(os.path.exists(missing))
 
-    def test_imported_memories_keep_their_old_ids(self) -> None:
-        self.s.run("import", optmem_log(os.path.join(self.s.tmp.name, "optmem"), ["first thing", "second thing", "third thing"]))
+    def test_import_keeps_old_ids_and_adds_only_what_is_new(self) -> None:
+        folder = optmem_log(os.path.join(self.s.tmp.name, "optmem"), ["first thing", "second thing"])
+        self.s.note("a note written before the import")
+        for _ in range(2):
+            self.s.run("import", folder)
+        self.assertEqual(len(self.s.log()), 3)
+        with open(os.path.join(folder, "LOG.txt"), "ab") as f:
+            f.write(b"#2 2026-11-02 third thing".ljust(OPTMEM_RECORD - 1) + b"\n")
+        self.s.run("import", folder)
+        self.assertEqual(len(self.s.log()), 4)
         self.assertIn("second thing", self.s.run("open", "#1").stdout)
 
 
