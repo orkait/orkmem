@@ -16,6 +16,8 @@ ASK_LINES = 20
 WRITERS, NOTES_EACH = 8, 15
 BULK = 3000
 OPTMEM_RECORD = 320
+TIGHT_RULE_BYTES = 200
+TIDY = "TIDY"
 
 
 def optmem_log(folder: str, texts: list[str]) -> str:
@@ -94,9 +96,37 @@ class Invariants(unittest.TestCase):
         again = self.s.run("note", "--rule", "--replaces", a[:8], "a second successor", ok=False)
         self.assertIn("already outdated", again.stderr)
 
-    def test_expired_rule_is_surfaced_for_the_user(self) -> None:
-        self.s.note("--rule", "--until", "2020-01-01", "for now, no paid tests")
-        self.assertIn("no paid tests", self.s.wake().split("EXPIRED")[1])
+    def test_over_budget_rules_ask_the_agent_to_tidy_until_resolved(self) -> None:
+        self.s.run("config", f"RULE_BYTES={TIGHT_RULE_BYTES}")
+        a = self.s.note("--rule", "--user", "never merge a pull request without the user's OK")
+        b = self.s.note("--rule", "--user", "never merge a pull request before the checks pass")
+        c = self.s.note("--rule", "--user", "write every price in rupees")
+        d = self.s.note("--rule", "--user", "write every date as day month year")
+        tidy = self.s.wake().split(TIDY)[1]
+        self.assertTrue({a[:8], b[:8]} <= set(tidy.split()))
+        self.s.note("--rule", "--user", "--replaces", a[:8], "--replaces", b[:8],
+                    "never merge a pull request without the user's OK or before the checks pass")
+        self.assertTrue({c[:8], d[:8]} <= set(self.s.wake().split(TIDY)[1].split()))
+        self.s.run("distinct", c[:8], d[:8])
+        self.assertNotIn(TIDY, self.s.wake())
+
+    def test_a_merge_may_not_lose_a_never_or_invent_a_fact(self) -> None:
+        a = self.s.note("--rule", "--user", "never merge without the user's OK")
+        b = self.s.note("--rule", "--user", "never merge before the checks pass")
+        cases = [("drops never", "merge after the checks pass and the user's OK"),
+                 ("invents a number", "never merge before 3 checks pass or without the user's OK")]
+        for name, text in cases:
+            with self.subTest(name):
+                out = self.s.run("note", "--rule", "--user", "--replaces", a[:8], "--replaces", b[:8], text, ok=False)
+                self.assertIn("merge", out.stderr)
+                self.assertNotEqual(out.returncode, 0)
+
+    def test_only_the_user_ends_a_user_rule(self) -> None:
+        rule = self.s.note("--rule", "--user", "no subagents")
+        refused = [self.s.run("drop", rule[:8], "the agent thinks so", ok=False),
+                   self.s.run("note", "--rule", "--replaces", rule[:8], "subagents are fine", ok=False)]
+        self.assertTrue(all(out.returncode for out in refused))
+        self.s.note("--rule", "--user", "--replaces", rule[:8], "subagents are fine when the user asks for them")
 
     def test_damage_is_refused_not_served(self) -> None:
         for i in range(5):
