@@ -7,6 +7,7 @@
   memo ask <words>           search: current entries first, outdated ones marked
   memo open <id>             one entry whole, with what it replaced and what replaced it
   memo drop <id> "why"       retire an entry that is wrong or outdated
+  memo distinct <a> <b>      two rules the tidy prompt paired say different things
   memo guard [action]        does an active rule forbid this action (hook: JSON on stdin)
   memo import <optmem-dir>   add the OptMem memories (LOG.txt) not imported yet
   memo config [NAME=VALUE]   show or change the sizes
@@ -28,7 +29,7 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import NoReturn
 
-KNOBS = {"ENTRY_BYTES": 280, "PAGE_BYTES": 10000, "RECENT_LINES": 24, "ASK_LINES": 20, "HINTS": 3}
+KNOBS = {"ENTRY_BYTES": 280, "PAGE_BYTES": 10000, "RULE_BYTES": 8000, "RECENT_LINES": 24, "ASK_LINES": 20, "HINTS": 3}
 DEFAULT_DIR = "~/.orkmem/memory"
 LOG, HEAD, LOCK, CONFIG = "LOG.jsonl", "HEAD", ".lock", "config"
 ID_HEX, SHORT, MIN_REF = 16, 8, 4
@@ -37,7 +38,16 @@ OPTMEM_RECORD = 320
 MORE, END = "More: memo wake", "End of memory."
 WORD = re.compile(r"[a-z0-9][a-z0-9_.-]{2,}")
 REGEX_SIGNS = re.compile(r"[\\^$.*+?()\[\]{}]")
+TERM = re.compile(r"[a-z']+")
+FACT_ATOM = re.compile(r"\d+(?:[.,:]\d+)*|[\w.-]*[/_][\w./-]*")
+MODAL = frozenset({"never", "no", "not", "don't", "dont", "must", "always", "only", "without"})
 EXIT_BLOCKED = 3
+RULES_HEAD = "RULES ({count}), newest first. Where two rules conflict, the newer one wins."
+TIDY_HEAD = "TIDY: rules fill {size} of {budget} bytes and these two overlap. Do this before your next action:"
+TIDY_MERGE = ('  Same rule: memo note --rule{user} --replaces {a} --replaces {b} "<one line that keeps every never, no, '
+              'not, must, always and only of both>"')
+TIDY_DISTINCT = "  Different rules: memo distinct {a} {b}"
+USER_RULE = "{id} is a rule the user stated. It ends only when the user changes it: memo note --rule --user --replaces {id} \"...\""
 
 
 class Kind(str, Enum):
@@ -63,16 +73,17 @@ class Entry:
     by: By
     text: str
     subject: str | None = None
-    until: str | None = None
+    until: str | None = None  # written by the first release; kept so those entries still verify
     guard: str | None = None
     open: bool = False
     drop: bool = False
     replaces: tuple[str, ...] = ()
     alias: str | None = None
+    pair: tuple[str, ...] = ()
     id: str = field(default="", compare=False)
 
     def body(self) -> dict[str, object]:
-        raw = {**asdict(self), "kind": self.kind.value, "by": self.by.value, "replaces": list(self.replaces)}
+        raw = {**asdict(self), "kind": self.kind.value, "by": self.by.value, "replaces": list(self.replaces), "pair": list(self.pair)}
         return {k: v for k, v in raw.items() if k != "id" and v is not None and v is not False and v != []}
 
     @property
@@ -83,7 +94,8 @@ class Entry:
     def parse(line: str) -> "Entry":
         try:
             raw = json.loads(line)
-            return Entry(**{**raw, "kind": Kind(raw["kind"]), "by": By(raw["by"]), "replaces": tuple(raw.get("replaces", ()))})
+            return Entry(**{**raw, "kind": Kind(raw["kind"]), "by": By(raw["by"]), "replaces": tuple(raw.get("replaces", ())),
+                            "pair": tuple(raw.get("pair", ()))})
         except (ValueError, TypeError, KeyError) as e:
             raise Damaged(f"unreadable line: {e}") from e
 
@@ -175,6 +187,7 @@ class Memory:
     entries: list[Entry]
     replaced_by: dict[str, str]
     by_id: dict[str, Entry]
+    distinct: set[frozenset[str]]
 
     @staticmethod
     def fold(entries: list[Entry]) -> "Memory":
@@ -187,10 +200,13 @@ class Memory:
                 if e.subject in latest:
                     replaced_by.setdefault(latest[e.subject], e.id)
                 latest[e.subject] = e.id
-        return Memory(entries, replaced_by, {e.id: e for e in entries})
+        return Memory(entries, replaced_by, {e.id: e for e in entries}, {frozenset(e.pair) for e in entries if e.pair})
 
     def current(self, e: Entry) -> bool:
         return not e.drop and e.id not in self.replaced_by
+
+    def rules(self) -> list[Entry]:
+        return [e for e in reversed(self.entries) if e.kind is Kind.RULE and self.current(e)]
 
     def final(self, e: Entry) -> Entry:
         while e.id in self.replaced_by:
@@ -241,20 +257,16 @@ def cmd_wake(d: str, a: argparse.Namespace) -> None:
             die(f"No entry {a.head}. Run: memo wake")
         entries = entries[: cut[0] + 1]
     mem = Memory.fold(entries)
-    live = [e for e in entries if mem.current(e)]
-    lapsed = [e for e in live if e.kind is Kind.RULE and e.until and e.until < today()]
-    rules = [e for e in live if e.kind is Kind.RULE and e not in lapsed]
-    opened = [e for e in live if e.kind is Kind.FACT and e.open]
-    facts = sorted((e for e in live if e.kind is Kind.FACT and e.subject and not e.open), key=lambda e: e.subject or "")
+    live = [e for e in entries if mem.current(e) and e.kind is Kind.FACT]
+    opened = [e for e in live if e.open]
+    facts = sorted((e for e in live if e.subject and not e.open), key=lambda e: e.subject or "")
     recent = [e for e in entries if not e.drop][-k["RECENT_LINES"]:]
-    rule_lines = [show(e, mem) for e in rules]
-    crowded = sum(len(x.encode()) + 1 for x in rule_lines) > k["PAGE_BYTES"] - FRAME_BYTES
-    lines = [f"RULES ({len(rules)})" + (": more than a page, ask the user which to merge or drop" if crowded else ""), *rule_lines]
-    if lapsed:
-        lines += ["EXPIRED (ask the user: keep or drop)", *(show(e, mem) for e in lapsed)]
+    rules = mem.rules()
+    lines = [RULES_HEAD.format(count=len(rules)), *(show(e, mem) for e in rules)]
     lines += [f"OPEN ({len(opened)})", *(show(e, mem) for e in opened)]
     lines += [f"NOW ({len(facts)})", *(f"{show(e, mem)}  ({age(e)})" for e in facts)]
     lines += [f"RECENT ({len(recent)})", *(show(e, mem) for e in recent)]
+    lines += tidy_lines(mem, k["RULE_BYTES"])
     book = pages(lines, k["PAGE_BYTES"])
     if not 1 <= a.page <= len(book):
         die(f"No page {a.page}: the memory has {len(book)}. Run: memo wake")
@@ -268,11 +280,43 @@ def words(text: str) -> set[str]:
     return set(WORD.findall(text.lower()))
 
 
+def overlap(df: Counter[str], size: int, a: str, b: str) -> float:
+    return sum(math.log(size / df[w]) for w in words(a) & words(b))
+
+
 def closest(pool: list[Entry], text: str, n: int) -> list[Entry]:
     df = Counter(w for e in pool for w in words(e.text))
-    want = words(text)
-    scored = [(sum(math.log(len(pool) / df[w]) for w in want & words(e.text)), e) for e in pool]
+    scored = [(overlap(df, len(pool), text, e.text), e) for e in pool]
     return [e for s, e in sorted(scored, key=lambda x: (-x[0], -x[1].n)) if s > 0][:n]
+
+
+def tidy_lines(mem: Memory, budget: int) -> list[str]:
+    rules = mem.rules()
+    size = sum(len(show(e, mem).encode()) + 1 for e in rules)
+    if size <= budget:
+        return []
+    df = Counter(w for e in rules for w in words(e.text))
+    pairs = [(overlap(df, len(rules), a.text, b.text), a, b) for i, a in enumerate(rules) for b in rules[i + 1:]
+             if frozenset((a.id, b.id)) not in mem.distinct]
+    best = max(pairs, key=lambda p: p[0], default=None)
+    if best is None or best[0] <= 0:
+        return []
+    _, a, b = best
+    user = " --user" if By.USER in (a.by, b.by) else ""
+    ids = {"a": a.id[:SHORT], "b": b.id[:SHORT]}
+    return [TIDY_HEAD.format(size=size, budget=budget), show(a, mem), show(b, mem),
+            TIDY_MERGE.format(user=user, **ids), TIDY_DISTINCT.format(**ids)]
+
+
+def merge_problem(text: str, olds: tuple[Entry, ...]) -> str | None:
+    lost = {t for o in olds for t in TERM.findall(o.text.lower()) if t in MODAL} - set(TERM.findall(text.lower()))
+    known = {m.lower() for o in olds for m in FACT_ATOM.findall(o.text)}
+    invented = {m.lower() for m in FACT_ATOM.findall(text)} - known
+    if lost:
+        return f"The merge drops {', '.join(sorted(lost))}: keep every never, no, not, must, always and only of the rules it merges."
+    if invented:
+        return f"The merge adds {', '.join(sorted(invented))}, which none of the merged rules says."
+    return None
 
 
 def check_text(text: str, limit: int) -> str:
@@ -290,18 +334,22 @@ def cmd_note(d: str, a: argparse.Namespace) -> None:
     kind = Kind.RULE if a.rule else Kind.FACT
     if kind is Kind.RULE and (a.subject or a.open):
         die("--subject and --open are for facts; a rule holds until replaced or dropped.")
-    if kind is Kind.FACT and (a.guard or a.until):
-        die("--guard and --until are for rules.")
-    if a.until:
-        datetime.date.fromisoformat(a.until)
+    if kind is Kind.FACT and a.guard:
+        die("--guard is for rules.")
     if a.guard:
         re.compile(a.guard)
     targets = tuple(mem.resolve(r) for r in a.replaces)
     for t in targets:
         if not mem.current(t):
             die(f"{t.id[:SHORT]} is already outdated: now {mem.final(t).id[:SHORT]}. Replace that one instead.")
+        if t.kind is Kind.RULE and t.by is By.USER and not a.user:
+            die(USER_RULE.format(id=t.id[:SHORT]))
     text = check_text(a.text, k["ENTRY_BYTES"])
-    draft = Entry(0, "", now(), kind, By.USER if a.user else By.AGENT, text, a.subject, a.until, a.guard, a.open, False, tuple(t.id for t in targets))
+    merged = [t for t in targets if t.kind is Kind.RULE]
+    problem = merge_problem(text, targets) if kind is Kind.RULE and len(merged) > 1 else None
+    if problem:
+        die(problem)
+    draft = Entry(0, "", now(), kind, By.USER if a.user else By.AGENT, text, a.subject, None, a.guard, a.open, False, tuple(t.id for t in targets))
     e = append(d, [draft])[0]
     after = Memory.fold([*entries, e])
     print(f"Saved {e.id}")
@@ -311,6 +359,7 @@ def cmd_note(d: str, a: argparse.Namespace) -> None:
     if near:
         print(f'Closest earlier. If your note makes one outdated: memo drop <id> "replaced by {e.id[:SHORT]}"')
         print("\n".join(show(x, after) for x in near))
+    print("\n".join(tidy_lines(after, k["RULE_BYTES"])))
 
 
 def cmd_ask(d: str, a: argparse.Namespace) -> None:
@@ -353,7 +402,7 @@ def cmd_open(d: str, a: argparse.Namespace) -> None:
     e = mem.resolve(a.ref)
     print(f"{e.id}  {e.kind.value} by {e.by.value} at {e.at}" + (f"  (OptMem {e.alias})" if e.alias else ""))
     print(f"  {e.text}")
-    for name in ("subject", "until", "guard"):
+    for name in ("subject", "guard"):
         if getattr(e, name):
             print(f"  {name}: {getattr(e, name)}")
     if not mem.current(e):
@@ -369,9 +418,22 @@ def cmd_drop(d: str, a: argparse.Namespace) -> None:
     target = mem.resolve(a.ref)
     if not mem.current(target):
         die(f"{target.id[:SHORT]} is already outdated: now {mem.final(target).id[:SHORT]}.")
+    if target.kind is Kind.RULE and target.by is By.USER:
+        die(USER_RULE.format(id=target.id[:SHORT]))
     why = check_text(a.why, knobs(d)["ENTRY_BYTES"])
     e = append(d, [Entry(0, "", now(), target.kind, By.AGENT, why, drop=True, replaces=(target.id,))])[0]
     print(f"Dropped {target.id[:SHORT]} ({e.id})")
+
+
+def cmd_distinct(d: str, a: argparse.Namespace) -> None:
+    mem = Memory.fold(read(d))
+    pair = (mem.resolve(a.a), mem.resolve(a.b))
+    if not all(e.kind is Kind.RULE and mem.current(e) for e in pair):
+        die("distinct takes two current rules.")
+    text = f"rules {pair[0].id[:SHORT]} and {pair[1].id[:SHORT]} say different things"
+    e = append(d, [Entry(0, "", now(), Kind.FACT, By.AGENT, text, pair=tuple(x.id for x in pair))])[0]
+    print(f"Saved {e.id}")
+    print("\n".join(tidy_lines(Memory.fold([*mem.entries, e]), knobs(d)["RULE_BYTES"])))
 
 
 def blocking(d: str, action: str) -> list[Entry]:
@@ -433,7 +495,9 @@ Your memory is orkmem. The tool is `{memo}`; the memory is in `{data}`.
 
 Your first action, and your first action after a compaction: `{memo} wake`.
 Read page after page until one ends with "End of memory." Every RULE applies,
-however old. A NOW fact is the last thing seen: check it again before you act on it.
+however old; where two conflict, the newer one wins. A NOW fact is the last thing
+seen: check it again before you act on it. When the memory shows a TIDY request,
+do it before your next action, the same way you would answer any other request.
 
 ### While working: write it down (mandatory)
 
@@ -444,7 +508,7 @@ however old. A NOW fact is the last thing seen: check it again before you act on
   a result, a lesson. One line, at most {chars} bytes. Do not repeat what is there.
 - `--replaces <id>` when a note corrects an earlier one; `{memo} drop <id> "why"`
   when one is wrong. When `note` lists a closest earlier entry your note makes
-  outdated, drop it.
+  outdated, drop it. A rule the user stated changes only when the user changes it.
 
 ### When you need something old
 
@@ -468,7 +532,7 @@ def cmd_init() -> None:
 
 
 COMMANDS = {"wake": cmd_wake, "note": cmd_note, "ask": cmd_ask, "open": cmd_open, "drop": cmd_drop,
-            "guard": cmd_guard, "import": cmd_import, "config": cmd_config}
+            "distinct": cmd_distinct, "guard": cmd_guard, "import": cmd_import, "config": cmd_config}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -482,7 +546,7 @@ def parser() -> argparse.ArgumentParser:
     n.add_argument("text")
     for flag in ("--rule", "--user", "--open"):
         n.add_argument(flag, action="store_true")
-    for flag in ("--subject", "--until", "--guard"):
+    for flag in ("--subject", "--guard"):
         n.add_argument(flag)
     n.add_argument("--replaces", action="append", default=[])
     q = sub.add_parser("ask")
@@ -494,6 +558,9 @@ def parser() -> argparse.ArgumentParser:
     r = sub.add_parser("drop")
     r.add_argument("ref")
     r.add_argument("why")
+    s = sub.add_parser("distinct")
+    s.add_argument("a")
+    s.add_argument("b")
     sub.add_parser("guard").add_argument("action", nargs="*")
     sub.add_parser("import").add_argument("optmem_dir")
     sub.add_parser("config").add_argument("set", nargs="*")

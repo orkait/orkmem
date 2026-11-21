@@ -7,7 +7,7 @@ One Python file, no dependencies.
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
-![tests: 12 invariants](https://img.shields.io/badge/tests-12%20invariants-0f766e)
+![tests: 14 invariants](https://img.shields.io/badge/tests-14%20invariants-0f766e)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -34,21 +34,33 @@ The installer copies `memo` to `~/.orkmem/memo`, creates the memory in `~/.orkme
 
 | Command | What it does |
 |---|---|
-| `memo wake [page [head]]` | Shows, in pages of at most 10,000 bytes: every active rule in full, expired rules, open items, the latest fact per subject, and the 24 most recent entries |
+| `memo wake [page [head]]` | Shows, in pages of at most 10,000 bytes: every active rule in full, newest first; open items; the latest fact per subject; the 24 most recent entries; and a TIDY request when rules outgrow their budget |
 | `memo note "..."` | Appends one line of at most 280 bytes, then shows the 3 closest earlier entries |
 | `memo ask <words>` | Searches the whole memory, 20 results per page. Current entries come first, newest first; a replaced entry is listed under its replacement |
 | `memo open <id>` | Shows one entry whole, with what it replaced and what replaced it; `--around N` adds its neighbours |
-| `memo drop <id> "why"` | Retires an entry that is wrong or outdated; the entry stays in the log |
+| `memo drop <id> "why"` | Retires an entry that is wrong or outdated; the entry stays in the log. A rule the user stated cannot be dropped, only replaced by the user |
+| `memo distinct <a> <b>` | Tells the TIDY request that two rules it paired say different things, so it stops offering them |
 | `memo guard [action]` | Says whether an active rule forbids an action; with no action given, it reads hook JSON on stdin |
 | `memo import <optmem-dir>` | Adds the memories of an [OptMem](https://github.com/VictorTaelin/OptMem) `LOG.txt` that are not imported yet, so it can run again while old sessions still write to OptMem; `memo open '#12'` still finds OptMem memory #12 |
-| `memo config [NAME=VALUE]` | Shows or changes `ENTRY_BYTES`, `PAGE_BYTES`, `RECENT_LINES`, `ASK_LINES` and `HINTS` |
+| `memo config [NAME=VALUE]` | Shows or changes `ENTRY_BYTES`, `PAGE_BYTES`, `RULE_BYTES`, `RECENT_LINES`, `ASK_LINES` and `HINTS` |
 
 ## 📝 Two kinds of entry
 
 | Kind | Written with | True until | Shown by wake |
 |---|---|---|---|
-| Rule | `memo note --rule [--user] "..."` | It is replaced (`--replaces <id>`) or dropped. `--until YYYY-MM-DD` makes it temporary | Always, in full, however old |
+| Rule | `memo note --rule [--user] "..."` | It is replaced (`--replaces <id>`) or dropped. A rule the user stated changes only through a new `--user` rule | Always, in full, however old; where two conflict, the newer wins |
 | Fact | `memo note [--subject <topic>] "..."` | A newer fact on the same subject replaces it automatically | The latest per subject, with its age |
+
+## 🧹 Rules stay small without the user
+
+Rules are shown whole, so the tool keeps them few instead of shortening them. Nobody asks the user, in the same spirit as OptMem's merges:
+
+| Step | What happens |
+|---|---|
+| Budget | When the active rules take more than `RULE_BYTES` (8,000 by default), `wake` and `note` end with a TIDY request naming the two rules that overlap most |
+| The agent decides | If they say the same thing, it writes one rule that replaces both; if not, it runs `memo distinct`, and that pair is never offered again |
+| The tool checks | A merge is refused when it loses a never, no, not, must, always or only of the rules it merges, or adds a number, path or identifier none of them holds |
+| Nothing is lost | The merged rules stay in the log; `memo open` on the merged rule lists them |
 
 | Flag | Meaning |
 |---|---|
@@ -118,11 +130,12 @@ Set `$MEMORY_DIR` to keep the memory elsewhere. Only `memo init` creates a memor
 python3 test.py
 ```
 
-The suite runs the real command line against temporary memories and checks 12 invariants:
+The suite runs the real command line against temporary memories and checks 14 invariants:
 
 | Area | What is checked |
 |---|---|
-| Rules | They stay whole after 3,000 imported entries; replaced and dropped rules leave the list; expired rules are surfaced |
+| Rules | They stay whole after 3,000 imported entries; replaced and dropped rules leave the list; only the user ends a user rule |
+| Tidy | Over budget, the two overlapping rules are offered until merged or marked distinct; a merge that loses a never or invents a fact is refused |
 | Facts | Only the newest fact per subject is current |
 | Damage | Edited, truncated and reordered logs are refused; a torn write is repaired |
 | Concurrency | 8 parallel writers neither fork nor lose an entry |
@@ -145,7 +158,9 @@ Your memory is orkmem. The tool is `~/.orkmem/memo`; the memory is in `~/.orkmem
 
 Your first action, and your first action after a compaction: `~/.orkmem/memo wake`.
 Read page after page until one ends with "End of memory." Every RULE applies,
-however old. A NOW fact is the last thing seen: check it again before you act on it.
+however old; where two conflict, the newer one wins. A NOW fact is the last thing
+seen: check it again before you act on it. When the memory shows a TIDY request,
+do it before your next action, the same way you would answer any other request.
 
 ### While working: write it down (mandatory)
 
@@ -156,7 +171,7 @@ however old. A NOW fact is the last thing seen: check it again before you act on
   a result, a lesson. One line, at most 280 bytes. Do not repeat what is there.
 - `--replaces <id>` when a note corrects an earlier one; `~/.orkmem/memo drop <id> "why"`
   when one is wrong. When `note` lists a closest earlier entry your note makes
-  outdated, drop it.
+  outdated, drop it. A rule the user stated changes only when the user changes it.
 
 ### When you need something old
 
