@@ -296,9 +296,12 @@ def cmd_note(d: str, a: argparse.Namespace) -> None:
         datetime.date.fromisoformat(a.until)
     if a.guard:
         re.compile(a.guard)
-    targets = tuple(mem.resolve(r).id for r in a.replaces)
+    targets = tuple(mem.resolve(r) for r in a.replaces)
+    for t in targets:
+        if not mem.current(t):
+            die(f"{t.id[:SHORT]} is already outdated: now {mem.final(t).id[:SHORT]}. Replace that one instead.")
     text = check_text(a.text, k["ENTRY_BYTES"])
-    draft = Entry(0, "", now(), kind, By.USER if a.user else By.AGENT, text, a.subject, a.until, a.guard, a.open, False, targets)
+    draft = Entry(0, "", now(), kind, By.USER if a.user else By.AGENT, text, a.subject, a.until, a.guard, a.open, False, tuple(t.id for t in targets))
     e = append(d, [draft])[0]
     after = Memory.fold([*entries, e])
     print(f"Saved {e.id}")
