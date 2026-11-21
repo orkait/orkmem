@@ -40,7 +40,7 @@ The installer copies `memo` to `~/.orkmem/memo`, creates the memory in `~/.orkme
 | `memo open <id>` | Shows one entry whole, with what it replaced and what replaced it; `--around N` adds its neighbours |
 | `memo drop <id> "why"` | Retires an entry that is wrong or outdated; the entry stays in the log |
 | `memo guard [action]` | Says whether an active rule forbids an action; with no action given, it reads hook JSON on stdin |
-| `memo import <optmem-dir>` | Loads an [OptMem](https://github.com/VictorTaelin/OptMem) `LOG.txt` into an empty memory; `memo open '#12'` still finds OptMem memory #12 |
+| `memo import <optmem-dir>` | Adds the memories of an [OptMem](https://github.com/VictorTaelin/OptMem) `LOG.txt` that are not imported yet, so it can run again while old sessions still write to OptMem; `memo open '#12'` still finds OptMem memory #12 |
 | `memo config [NAME=VALUE]` | Shows or changes `ENTRY_BYTES`, `PAGE_BYTES`, `RECENT_LINES`, `ASK_LINES` and `HINTS` |
 
 ## 📝 Two kinds of entry
@@ -130,7 +130,7 @@ The suite runs the real command line against temporary memories and checks 12 in
 | `ask` | Results are bounded |
 | `guard` | It denies only what active rules forbid, and fails closed |
 | Input | Bad input is refused |
-| Import | OptMem ids survive import |
+| Import | OptMem ids survive import; running it again adds only what is new |
 
 ## 🧾 The prompt
 
